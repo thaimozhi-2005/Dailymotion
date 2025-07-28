@@ -16,7 +16,7 @@ from aiohttp import web
 import signal
 import sys
 
-# Configure logging for cloud environment
+# Configure logging for Render
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -73,8 +73,8 @@ class DailymotionUploader:
             logger.error(f"Unexpected authentication error: {e}")
             return False
     
-    def upload_video(self, file_path, title, description="", tags=""):
-        """Upload video to Dailymotion"""
+    def upload_video(self, file_path, title, description="", tags="", channel=""):
+        """Upload video to Dailymotion with optional channel"""
         if not self.access_token:
             return None, "No access token available"
         
@@ -125,6 +125,9 @@ class DailymotionUploader:
                 'tags': tags,
                 'published': 'true'
             }
+            if channel:
+                video_data['channel'] = channel  # Add channel if provided
+            
             create_response = requests.post(create_url, data=video_data, headers=headers, timeout=30)
             
             if create_response.status_code in [200, 201]:
@@ -158,12 +161,12 @@ class TelegramBot:
         self.bot_token = bot_token
         self.client = None
         self.uploader = DailymotionUploader()
-        self.user_sessions = {}
+        self.user_sessions = {}  # Stores user state and channels
         self.temp_dir = tempfile.mkdtemp()
         self.running = False
         
     async def start_bot(self):
-        """Start the Telegram bot"""
+        """Start the Telegram bot on Render"""
         try:
             self.client = TelegramClient('bot_session', self.api_id, self.api_hash)
             await self.client.start(bot_token=self.bot_token)
@@ -173,7 +176,7 @@ class TelegramBot:
             @self.client.on(events.NewMessage(pattern='/start'))
             async def start_handler(event):
                 user_id = event.sender_id
-                self.user_sessions[user_id] = {'step': 'waiting_api_key'}
+                self.user_sessions[user_id] = {'step': 'waiting_api_key', 'channels': {}}
                 welcome_msg = """
 🎬 **Dailymotion Video Upload Bot**
 
@@ -189,27 +192,59 @@ First, I need your Dailymotion API credentials:
                 help_msg = """
 🆘 **Help - How to use this bot:**
 
-1️⃣ Send /start to begin
-2️⃣ Provide your Dailymotion API credentials
-3️⃣ Send a video file
-4️⃣ Provide a title for your video
-5️⃣ Wait for upload to complete
+1️⃣ /start - Begin setup
+2️⃣ /addch <channel_name> - Add a new Dailymotion channel
+3️⃣ /list - Show all your channels
+4️⃣ /upload - Start video upload process
+5️⃣ Provide Dailymotion API credentials, then send a video and title
 
 **Need Dailymotion API credentials?**
 Visit: https://developers.dailymotion.com/
 
 **Supported formats:** MP4, AVI, MOV, WMV, etc.
 **Max file size:** Depends on your Dailymotion account
-
-For issues, contact the bot administrator.
                 """
                 await event.respond(help_msg)
+            
+            @self.client.on(events.NewMessage(pattern='/addch (.*)'))
+            async def add_channel_handler(event):
+                user_id = event.sender_id
+                if user_id not in self.user_sessions:
+                    await event.respond("Please start with /start command")
+                    return
+                channel_name = event.pattern_match.group(1).strip()
+                if channel_name:
+                    self.user_sessions[user_id]['channels'][channel_name] = True
+                    await event.respond(f"✅ Added channel: {channel_name}")
+                else:
+                    await event.respond("❌ Please provide a channel name, e.g., /addch MyChannel")
+            
+            @self.client.on(events.NewMessage(pattern='/list'))
+            async def list_channels_handler(event):
+                user_id = event.sender_id
+                if user_id not in self.user_sessions:
+                    await event.respond("Please start with /start command")
+                    return
+                channels = self.user_sessions[user_id].get('channels', {})
+                if channels:
+                    await event.respond("📋 **Your Channels:**\n" + "\n".join(channels.keys()))
+                else:
+                    await event.respond("📭 No channels added yet. Use /addch <channel_name> to add one.")
+            
+            @self.client.on(events.NewMessage(pattern='/upload'))
+            async def upload_handler(event):
+                user_id = event.sender_id
+                if user_id not in self.user_sessions or self.user_sessions[user_id].get('step') != 'authenticated':
+                    await event.respond("Please authenticate with /start and provide credentials first.")
+                    return
+                self.user_sessions[user_id]['step'] = 'waiting_video'
+                await event.respond("📹 **Upload Process Started**\nPlease send the video file you want to upload.")
             
             @self.client.on(events.NewMessage)
             async def message_handler(event):
                 if event.text and event.text.startswith('/'):
                     return  # Skip commands already handled
-                    
+                
                 user_id = event.sender_id
                 
                 if user_id not in self.user_sessions:
@@ -247,12 +282,12 @@ For issues, contact the bot administrator.
                     )
                     
                     if success:
-                        await event.respond("✅ **Authentication Successful!**\n\n📹 Now send me a video file to upload to Dailymotion!")
+                        await event.respond("✅ **Authentication Successful!**\n\nUse /upload to start uploading a video.")
                     else:
                         await event.respond("❌ **Authentication Failed!**\n\nPlease check your credentials and try again with /start")
                         del self.user_sessions[user_id]
                         
-                elif step == 'authenticated' and event.document:
+                elif step == 'waiting_video' and event.document:
                     if event.document.mime_type and event.document.mime_type.startswith('video/'):
                         session['step'] = 'waiting_title'
                         session['video_message'] = event
@@ -263,8 +298,32 @@ For issues, contact the bot administrator.
                 elif step == 'waiting_title':
                     title = event.text.strip()
                     session['video_title'] = title
-                    session['step'] = 'authenticated'
-                    await self.process_video_upload(event, session)
+                    session['step'] = 'waiting_channel'
+                    channels = session.get('channels', {})
+                    if channels:
+                        await event.respond(f"📡 **Select a channel to upload to:**\n" + "\n".join([f"{i+1}. {ch}" for i, ch in enumerate(channels.keys())]) + "\nSend the number (e.g., 1) or 'skip' to use default.")
+                    else:
+                        session['step'] = 'authenticated'
+                        await self.process_video_upload(event, session)
+                
+                elif step == 'waiting_channel':
+                    try:
+                        choice = event.text.strip().lower()
+                        channels = session.get('channels', {})
+                        if choice == 'skip' or not channels:
+                            session['step'] = 'authenticated'
+                            await self.process_video_upload(event, session)
+                        else:
+                            index = int(choice) - 1
+                            if 0 <= index < len(channels):
+                                channel = list(channels.keys())[index]
+                                session['selected_channel'] = channel
+                                session['step'] = 'authenticated'
+                                await self.process_video_upload(event, session)
+                            else:
+                                await event.respond("❌ Invalid choice. Please send a valid number or 'skip'.")
+                    except ValueError:
+                        await event.respond("❌ Please send a number or 'skip'.")
         
         except Exception as e:
             logger.error(f"Error starting bot on Render: {e}")
@@ -275,7 +334,8 @@ For issues, contact the bot administrator.
         try:
             video_message = session['video_message']
             title = session['video_title']
-            logger.info(f"Starting video upload process for user {event.sender_id} with title: {title}")
+            channel = session.get('selected_channel', '')
+            logger.info(f"Starting video upload process for user {event.sender_id} with title: {title}, channel: {channel}")
             
             # Send initial progress message
             progress_msg = await event.respond("📥 **Downloading video...**\n⏳ 0%")
@@ -302,7 +362,7 @@ For issues, contact the bot administrator.
             logger.info("Updated progress message to uploading state")
             
             # Upload to Dailymotion
-            video_url, error_msg = self.uploader.upload_video(file_path, title)
+            video_url, error_msg = self.uploader.upload_video(file_path, title, channel=channel)
             logger.info(f"Upload result - URL: {video_url}, Error: {error_msg}")
             
             # Clean up temporary file
@@ -323,12 +383,12 @@ For issues, contact the bot administrator.
 🔗 **Video URL:** {video_url}
 
 The video is now available on Dailymotion!
-You can send another video to upload more.
+Use /upload to send another video.
                 """
                 await progress_msg.edit(success_msg)
                 logger.info(f"Successfully processed upload for user {event.sender_id}")
             else:
-                await progress_msg.edit(f"❌ **Upload Failed:**\n{error_msg}\n\nPlease try again.")
+                await progress_msg.edit(f"❌ **Upload Failed:**\n{error_msg}\n\nPlease try again with /upload.")
                 logger.error(f"Upload failed for user {event.sender_id}: {error_msg}")
                 
         except Exception as e:
