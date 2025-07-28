@@ -16,10 +16,11 @@ from aiohttp import web
 import signal
 import sys
 
-# Configure logging
+# Configure logging for cloud environment
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
@@ -34,10 +35,7 @@ class DailymotionUploader:
     def get_access_token(self, api_key, api_secret, username, password):
         """Get access token using username and password"""
         try:
-            # Corrected OAuth token URL
             token_url = "https://api.dailymotion.com/oauth/token"
-            
-            # Data payload with version=2 for password grant type
             data = {
                 'grant_type': 'password',
                 'client_id': api_key,
@@ -45,15 +43,9 @@ class DailymotionUploader:
                 'username': username,
                 'password': password,
                 'scope': 'read write',
-                'version': '2'  # Added as per Dailymotion API examples
+                'version': '2'
             }
-            
-            # Ensure proper headers for form-encoded data
-            headers = {
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
-            
-            # Make POST request
+            headers = {'Content-Type': 'application/x-www-form-urlencoded'}
             response = requests.post(token_url, data=data, headers=headers, timeout=30)
             
             if response.status_code == 200:
@@ -71,7 +63,6 @@ class DailymotionUploader:
             else:
                 logger.error(f"Token error: {response.status_code} - {response.text}")
                 return False
-                
         except requests.exceptions.RequestException as e:
             logger.error(f"Network error during authentication: {e}")
             return False
@@ -89,41 +80,44 @@ class DailymotionUploader:
         
         try:
             # Step 1: Get upload URL
-            upload_url = "https://api.dailymotion.com/file/upload"  # Corrected base URL
-            
+            upload_url = "https://api.dailymotion.com/file/upload"
             headers = {
                 'Authorization': f'Bearer {self.access_token}',
                 'Content-Type': 'application/json'
             }
-            
             response = requests.get(upload_url, headers=headers, timeout=30)
             
             if response.status_code != 200:
+                logger.error(f"Failed to get upload URL: {response.status_code} - {response.text}")
                 return None, f"Failed to get upload URL: {response.status_code} - {response.text}"
             
             upload_data = response.json()
             upload_endpoint = upload_data.get('upload_url')
-            
             if not upload_endpoint:
+                logger.error("No upload URL received in response")
                 return None, "No upload URL received"
+            
+            logger.info(f"Received upload endpoint: {upload_endpoint}")
             
             # Step 2: Upload file
             with open(file_path, 'rb') as video_file:
-                files = {'file': video_file}
+                files = {'file': (os.path.basename(file_path), video_file, 'video/mp4')}
                 upload_response = requests.post(upload_endpoint, files=files, timeout=300)
             
             if upload_response.status_code != 200:
+                logger.error(f"File upload failed: {upload_response.status_code} - {upload_response.text}")
                 return None, f"File upload failed: {upload_response.status_code} - {upload_response.text}"
             
             upload_result = upload_response.json()
             file_url = upload_result.get('url')
-            
             if not file_url:
+                logger.error("No file URL received after upload")
                 return None, "No file URL received after upload"
             
-            # Step 3: Create video object
-            create_url = "https://api.dailymotion.com/videos"  # Corrected base URL
+            logger.info(f"File uploaded, received file URL: {file_url}")
             
+            # Step 3: Create video object
+            create_url = "https://api.dailymotion.com/videos"
             video_data = {
                 'url': file_url,
                 'title': title,
@@ -131,7 +125,6 @@ class DailymotionUploader:
                 'tags': tags,
                 'published': 'true'
             }
-            
             create_response = requests.post(create_url, data=video_data, headers=headers, timeout=30)
             
             if create_response.status_code in [200, 201]:
@@ -142,8 +135,10 @@ class DailymotionUploader:
                     logger.info(f"Successfully uploaded video: {video_id}")
                     return video_url, "Success"
                 else:
+                    logger.error("Video created but no ID received")
                     return None, "Video created but no ID received"
             else:
+                logger.error(f"Video creation failed: {create_response.status_code} - {create_response.text}")
                 return None, f"Video creation failed: {create_response.status_code} - {create_response.text}"
                 
         except requests.exceptions.RequestException as e:
@@ -153,7 +148,7 @@ class DailymotionUploader:
             logger.error(f"JSON parsing error during upload: {e}")
             return None, f"Upload error: {str(e)}"
         except Exception as e:
-            logger.error(f"Unexpected upload error: {str(e)}")
+            logger.error(f"Unexpected upload error: {e}")
             return None, f"Upload error: {str(e)}"
 
 class TelegramBot:
@@ -173,13 +168,12 @@ class TelegramBot:
             self.client = TelegramClient('bot_session', self.api_id, self.api_hash)
             await self.client.start(bot_token=self.bot_token)
             self.running = True
-            logger.info("Telegram bot started successfully")
+            logger.info("Telegram bot started successfully on Render")
             
             @self.client.on(events.NewMessage(pattern='/start'))
             async def start_handler(event):
                 user_id = event.sender_id
                 self.user_sessions[user_id] = {'step': 'waiting_api_key'}
-                
                 welcome_msg = """
 🎬 **Dailymotion Video Upload Bot**
 
@@ -244,9 +238,7 @@ For issues, contact the bot administrator.
                     session['password'] = event.text.strip()
                     session['step'] = 'authenticated'
                     
-                    # Try to authenticate
                     await event.respond("🔐 Authenticating with Dailymotion...")
-                    
                     success = self.uploader.get_access_token(
                         session['api_key'],
                         session['api_secret'],
@@ -261,7 +253,6 @@ For issues, contact the bot administrator.
                         del self.user_sessions[user_id]
                         
                 elif step == 'authenticated' and event.document:
-                    # Check if it's a video file
                     if event.document.mime_type and event.document.mime_type.startswith('video/'):
                         session['step'] = 'waiting_title'
                         session['video_message'] = event
@@ -273,12 +264,10 @@ For issues, contact the bot administrator.
                     title = event.text.strip()
                     session['video_title'] = title
                     session['step'] = 'authenticated'
-                    
-                    # Start upload process
                     await self.process_video_upload(event, session)
         
         except Exception as e:
-            logger.error(f"Error starting bot: {e}")
+            logger.error(f"Error starting bot on Render: {e}")
             raise
     
     async def process_video_upload(self, event, session):
@@ -286,29 +275,45 @@ For issues, contact the bot administrator.
         try:
             video_message = session['video_message']
             title = session['video_title']
+            logger.info(f"Starting video upload process for user {event.sender_id} with title: {title}")
             
             # Send initial progress message
             progress_msg = await event.respond("📥 **Downloading video...**\n⏳ 0%")
+            logger.info(f"Sent initial progress message for download")
             
             # Download video with progress
             file_name = f"video_{int(time.time())}_{event.sender_id}.mp4"
             file_path = os.path.join(self.temp_dir, file_name)
+            logger.info(f"Attempting to download video to: {file_path}")
             
-            # Download file
-            await video_message.download_media(file_path, progress_callback=lambda current, total: 
+            await video_message.download_media(file=file_path, progress_callback=lambda current, total: 
                 asyncio.create_task(self.update_progress(progress_msg, "📥 Downloading", current, total)))
+            
+            logger.info(f"Video downloaded to: {file_path}")
+            
+            # Verify file exists and is not empty
+            if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                logger.error(f"Downloaded file is missing or empty: {file_path}")
+                await progress_msg.edit("❌ **Error:** Downloaded file is missing or empty. Please try again.")
+                return
             
             # Update progress for upload
             await progress_msg.edit("📤 **Uploading to Dailymotion...**\n⏳ Processing...")
+            logger.info("Updated progress message to uploading state")
             
             # Upload to Dailymotion
             video_url, error_msg = self.uploader.upload_video(file_path, title)
+            logger.info(f"Upload result - URL: {video_url}, Error: {error_msg}")
             
             # Clean up temporary file
             try:
-                os.remove(file_path)
-            except:
-                pass
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    logger.info(f"Cleaned up temporary file: {file_path}")
+                else:
+                    logger.warning(f"Temporary file not found for cleanup: {file_path}")
+            except Exception as e:
+                logger.error(f"Error cleaning up temporary file: {e}")
             
             if video_url:
                 success_msg = f"""
@@ -327,7 +332,7 @@ You can send another video to upload more.
                 logger.error(f"Upload failed for user {event.sender_id}: {error_msg}")
                 
         except Exception as e:
-            logger.error(f"Error processing upload: {e}")
+            logger.error(f"Error processing upload for user {event.sender_id} on Render: {e}")
             await event.respond(f"❌ **Error:** {str(e)}")
     
     async def update_progress(self, message, action, current, total):
@@ -337,23 +342,28 @@ You can send another video to upload more.
                 percentage = (current / total) * 100
                 progress_text = f"{action}...\n⏳ {percentage:.1f}%"
                 await message.edit(progress_text)
-        except:
-            pass  # Ignore edit conflicts
+        except Exception as e:
+            logger.error(f"Error updating progress on Render: {e}")
     
     async def stop_bot(self):
-        """Stop the bot gracefully"""
+        """Stop the bot gracefully for Render shutdown"""
         self.running = False
         if self.client:
             await self.client.disconnect()
+            logger.info("Disconnected Telegram client")
         self.cleanup()
-        logger.info("Bot stopped successfully")
+        logger.info("Bot stopped successfully on Render")
     
     def cleanup(self):
-        """Clean up temporary directory"""
+        """Clean up temporary directory for Render"""
         try:
-            shutil.rmtree(self.temp_dir)
-        except:
-            pass
+            if os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir)
+                logger.info(f"Cleaned up temporary directory: {self.temp_dir}")
+            else:
+                logger.warning(f"Temporary directory not found for cleanup: {self.temp_dir}")
+        except Exception as e:
+            logger.error(f"Error cleaning up temp dir on Render: {e}")
 
 # Global bot instance
 bot_instance = None
@@ -374,34 +384,35 @@ async def init_web_server():
     app.router.add_post('/webhook', webhook_handler)
     
     port = int(os.environ.get('PORT', 8080))
+    host = '0.0.0.0'
     
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
+    site = web.TCPSite(runner, host, port)
     await site.start()
     
-    logger.info(f"Web server started on port {port}")
+    logger.info(f"Web server started on {host}:{port} for Render")
     return runner
 
 async def main():
     """Main function for Render deployment"""
     global bot_instance
     
-    # Get environment variables
+    # Get and validate environment variables
     api_id = os.environ.get('TELEGRAM_API_ID')
     api_hash = os.environ.get('TELEGRAM_API_HASH')
     bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
     
     if not all([api_id, api_hash, bot_token]):
-        logger.error("Missing required environment variables!")
+        logger.error("Missing required environment variables on Render!")
         logger.error("Required: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_BOT_TOKEN")
-        return
+        sys.exit(1)
     
     try:
         api_id = int(api_id)
     except ValueError:
-        logger.error("TELEGRAM_API_ID must be a number!")
-        return
+        logger.error("TELEGRAM_API_ID must be a number on Render!")
+        sys.exit(1)
     
     # Initialize web server for Render
     web_runner = await init_web_server()
@@ -410,43 +421,44 @@ async def main():
     bot_instance = TelegramBot(api_id, api_hash, bot_token)
     
     async def shutdown_handler():
-        """Handle shutdown gracefully"""
-        logger.info("Shutting down...")
+        """Handle shutdown gracefully for Render"""
+        logger.info("Shutting down on Render...")
         if bot_instance:
             await bot_instance.stop_bot()
         await web_runner.cleanup()
+        logger.info("Shutdown complete on Render")
     
-    # Setup signal handlers
     def signal_handler(signum, frame):
-        logger.info(f"Received signal {signum}")
+        logger.info(f"Received signal {signum} on Render")
         asyncio.create_task(shutdown_handler())
     
+    # Register signal handlers for Render
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
     
     try:
-        # Start bot
         await bot_instance.start_bot()
         logger.info("✅ Bot started successfully on Render!")
         logger.info("👤 Users can interact with the bot using /start")
         
-        # Keep running
         while bot_instance.running:
             await asyncio.sleep(1)
             
     except Exception as e:
-        logger.error(f"❌ Error running bot: {e}")
+        logger.error(f"❌ Error running bot on Render: {e}")
+        await shutdown_handler()
+        sys.exit(1)
     finally:
         await shutdown_handler()
 
 if __name__ == "__main__":
-    # Set up asyncio for Render
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        logger.info("Bot stopped by user on Render")
     except Exception as e:
-        logger.error(f"Fatal error: {e}")
+        logger.error(f"Fatal error on Render: {e}")
+        sys.exit(1)
