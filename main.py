@@ -9,7 +9,6 @@ import tempfile
 import json
 import time
 from collections import deque
-from urllib.parse import urlencode
 from aiohttp import web
 import signal
 import sys
@@ -34,7 +33,7 @@ class DownloadSpeedMonitor:
         self.last_bytes = 0
         self.update_interval = 2.0
         
-    def calculate_speeds(self, current_bytes: int, current_time: float) -> Tuple[float, float, float]:
+    def calculate_speeds(self, current_bytes: int, current_time: float) -> tuple[float, float, float]:
         time_diff = max(current_time - self.last_update_time, 0.1)
         bytes_diff = max(current_bytes - self.last_bytes, 0)
         current_speed_bps = bytes_diff / time_diff
@@ -220,7 +219,7 @@ class TelegramDailymotionBot:
         self.app = Application.builder().token(telegram_token).build()
         self.pyrogram_client = PyrogramClient(session_name, api_id=api_id, api_hash=api_hash, bot_token=telegram_token)
         self.uploader = DailymotionUploader()
-        self.user_sessions = {}  # In-memory sessions
+        self.user_sessions = {}
         self.temp_dir = tempfile.mkdtemp()
         self.session_file = os.path.join(self.temp_dir, 'sessions.json')
         self.running = False
@@ -345,10 +344,12 @@ Visit: https://developers.dailymotion.com/
         monitor = DownloadSpeedMonitor(status_message, filename, file_size_mb)
         def progress_callback(current, total):
             asyncio.create_task(monitor.update_progress(current, total))
-        await self.pyrogram_client.download_media(file_id, file_name=file_path, progress=progress_callback)
-        final_size = os.path.getsize(file_path)
+        downloaded_file = await self.pyrogram_client.download_media(file_id, file_name=file_path, progress=progress_callback)
+        final_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+        if final_size == 0:
+            raise Exception("Downloaded file is empty")
         await monitor.finish(final_size)
-        return file_path
+        return downloaded_file
     
     async def process_video_upload(self, update: Update, context: ContextTypes.DEFAULT_TYPE, file_obj, filename: str):
         status_message = await update.message.reply_text("📥 Processing video...")
@@ -367,11 +368,10 @@ Visit: https://developers.dailymotion.com/
             if file_size_mb <= 20:
                 file = await context.bot.get_file(file_obj.file_id)
                 await file.download_to_drive(temp_path)
+                if os.path.getsize(temp_path) == 0:
+                    raise Exception("Download failed: empty file")
             else:
                 await self.download_large_file(file_obj.file_id, temp_path, status_message, filename, file_size_mb)
-            
-            if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-                raise Exception("Download failed")
             
             await status_message.edit_text("☁️ Uploading to Dailymotion...")
             file_url = await self.uploader.upload_video_file(temp_path)
@@ -396,6 +396,8 @@ Visit: https://developers.dailymotion.com/
                 await status_message.edit_text("❌ Duration exceeded! Check daily quota (2hrs).")
             elif "quota_exceeded" in error_msg:
                 await status_message.edit_text("❌ Quota exceeded! Wait 24hrs.")
+            elif "Download failed" in error_msg or "empty" in error_msg:
+                await status_message.edit_text("❌ Download failed: file is empty. Try again or check file size.")
             else:
                 await status_message.edit_text(f"❌ Failed: {error_msg}")
         
@@ -441,11 +443,12 @@ Visit: https://developers.dailymotion.com/
         async def health_check(request):
             return web.Response(text="Bot is running", status=200)
         
+        port = int(os.environ.get('PORT', '8080'))  # Use Render's PORT env var or default to 8080
         app = web.Application()
         app.router.add_get('/health', health_check)
         web_runner = web.AppRunner(app)
         asyncio.run_coroutine_threadsafe(web_runner.setup(), asyncio.get_event_loop())
-        site = web.TCPSite(web_runner, '0.0.0.0', 8080)
+        site = web.TCPSite(web_runner, '0.0.0.0', port)
         asyncio.run_coroutine_threadsafe(site.start(), asyncio.get_event_loop())
         
         try:
