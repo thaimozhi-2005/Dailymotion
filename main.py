@@ -16,6 +16,7 @@ from aiohttp import web
 import signal
 import sys
 from telethon.errors import RPCError
+import json
 
 # Configure logging for Render
 logging.basicConfig(
@@ -162,10 +163,32 @@ class TelegramBot:
         self.bot_token = bot_token
         self.client = None
         self.uploader = DailymotionUploader()
-        self.user_sessions = {}  # Stores user state and channels
+        self.user_sessions = {}  # In-memory sessions
         self.temp_dir = tempfile.mkdtemp()
+        self.session_file = os.path.join(self.temp_dir, 'sessions.json')  # File to persist sessions
         self.running = False
+        self.load_sessions()  # Load saved sessions on startup
         
+    def load_sessions(self):
+        """Load user sessions from file if it exists"""
+        try:
+            if os.path.exists(self.session_file):
+                with open(self.session_file, 'r') as f:
+                    self.user_sessions = json.load(f)
+                logger.info("Loaded user sessions from file")
+        except Exception as e:
+            logger.error(f"Error loading sessions: {e}")
+            self.user_sessions = {}
+    
+    def save_sessions(self):
+        """Save user sessions to file"""
+        try:
+            with open(self.session_file, 'w') as f:
+                json.dump(self.user_sessions, f)
+            logger.info("Saved user sessions to file")
+        except Exception as e:
+            logger.error(f"Error saving sessions: {e}")
+    
     async def start_bot(self):
         """Start the Telegram bot on Render"""
         try:
@@ -189,6 +212,7 @@ First, I need your Dailymotion API credentials:
                 """
                 await event.respond(welcome_msg)
                 logger.info(f"Started session for user {user_id}")
+                self.save_sessions()
             
             @self.client.on(events.NewMessage(pattern='/help'))
             async def help_handler(event):
@@ -223,6 +247,7 @@ Visit: https://developers.dailymotion.com/
                     logger.info(f"Added channel {channel_id} for user {user_id}")
                 else:
                     await event.respond("❌ Please provide a channel ID, e.g., /addch x123abc")
+                self.save_sessions()
             
             @self.client.on(events.NewMessage(pattern='/list'))
             async def list_channels_handler(event):
@@ -250,6 +275,7 @@ Visit: https://developers.dailymotion.com/
                 session['step'] = 'waiting_video'
                 await event.respond("📹 **Upload Process Started**\nPlease send the video file you want to upload.")
                 logger.info(f"Upload process started for user {user_id}")
+                self.save_sessions()
             
             @self.client.on(events.NewMessage)
             async def message_handler(event):
@@ -324,23 +350,24 @@ Visit: https://developers.dailymotion.com/
                     if channels:
                         await event.respond(f"📡 **Select a channel to upload to:**\n" + "\n".join([f"{i+1}. {ch}" for i, ch in enumerate(channels.keys())]) + "\nSend the number (e.g., 1) or 'skip' to use default.")
                     else:
-                        session['step'] = 'authenticated'
+                        session['step'] = 'processing_upload'
                         await self.process_video_upload(event, session)
                     logger.info(f"Title '{title}' received from user {user_id}")
+                    self.save_sessions()
                 
                 elif step == 'waiting_channel':
                     try:
                         choice = event.text.strip().lower()
                         channels = session.get('channels', {})
                         if choice == 'skip' or not channels:
-                            session['step'] = 'authenticated'
+                            session['step'] = 'processing_upload'
                             await self.process_video_upload(event, session)
                         else:
                             index = int(choice) - 1
                             if 0 <= index < len(channels):
                                 channel = list(channels.keys())[index]
                                 session['selected_channel'] = channel
-                                session['step'] = 'authenticated'
+                                session['step'] = 'processing_upload'
                                 await self.process_video_upload(event, session)
                             else:
                                 await event.respond("❌ Invalid choice. Please send a valid number or 'skip'.")
@@ -348,7 +375,11 @@ Visit: https://developers.dailymotion.com/
                     except ValueError:
                         await event.respond("❌ Please send a number or 'skip'.")
                         logger.info(f"Invalid channel selection from user {user_id}")
-        
+                    self.save_sessions()
+                elif step == 'processing_upload':
+                    await event.respond("⚠️ Upload is already in progress or was interrupted. Please wait or use /upload to start a new upload.")
+                    logger.info(f"Upload processing state for user {user_id}")
+                
         except Exception as e:
             logger.error(f"Error starting bot on Render: {e}")
             raise
@@ -380,6 +411,8 @@ Visit: https://developers.dailymotion.com/
                 if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
                     logger.error(f"Downloaded file is missing or empty: {file_path}")
                     await progress_msg.edit("❌ **Error:** Downloaded file is missing or empty. Please try again.")
+                    session['step'] = 'authenticated'
+                    self.save_sessions()
                     return
                 
                 # Update progress for upload
@@ -412,10 +445,14 @@ Use /upload to send another video.
                     """
                     await progress_msg.edit(success_msg)
                     logger.info(f"Successfully processed upload for user {event.sender_id}")
+                    session['step'] = 'authenticated'
+                    self.save_sessions()
                     return
                 else:
                     await progress_msg.edit(f"❌ **Upload Failed:**\n{error_msg}\n\nPlease try again with /upload.")
                     logger.error(f"Upload failed for user {event.sender_id}: {error_msg}")
+                    session['step'] = 'authenticated'
+                    self.save_sessions()
                     return
                 
             except RPCError as e:
@@ -428,9 +465,13 @@ Use /upload to send another video.
                 else:
                     logger.error(f"Max retries reached for user {event.sender_id}: {e}")
                     await event.respond(f"❌ **Error:** Max retries reached. Please try again with /upload. Error: {str(e)}")
+                    session['step'] = 'authenticated'
+                    self.save_sessions()
             except Exception as e:
                 logger.error(f"Error processing upload for user {event.sender_id} on Render: {e}")
                 await event.respond(f"❌ **Error:** {str(e)}")
+                session['step'] = 'authenticated'
+                self.save_sessions()
                 return
     
     async def update_progress(self, message, action, current, total):
@@ -449,6 +490,7 @@ Use /upload to send another video.
         if self.client:
             await self.client.disconnect()
             logger.info("Disconnected Telegram client")
+        self.save_sessions()  # Save sessions before cleanup
         self.cleanup()
         logger.info("Bot stopped successfully on Render")
     
