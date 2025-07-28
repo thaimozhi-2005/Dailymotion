@@ -15,6 +15,7 @@ import logging
 from aiohttp import web
 import signal
 import sys
+from telethon.errors import ConnectionError as TelethonConnectionError
 
 # Configure logging for Render
 logging.basicConfig(
@@ -102,7 +103,7 @@ class DailymotionUploader:
             # Step 2: Upload file
             with open(file_path, 'rb') as video_file:
                 files = {'file': (os.path.basename(file_path), video_file, 'video/mp4')}
-                upload_response = requests.post(upload_endpoint, files=files, timeout=300)
+                upload_response = requests.post(upload_endpoint, files=files, timeout=600)  # Increased timeout
             
             if upload_response.status_code != 200:
                 logger.error(f"File upload failed: {upload_response.status_code} - {upload_response.text}")
@@ -126,7 +127,7 @@ class DailymotionUploader:
                 'published': 'true'
             }
             if channel:
-                video_data['channel'] = channel  # Add channel if provided
+                video_data['channel'] = channel
             
             create_response = requests.post(create_url, data=video_data, headers=headers, timeout=30)
             
@@ -193,7 +194,7 @@ First, I need your Dailymotion API credentials:
 🆘 **Help - How to use this bot:**
 
 1️⃣ /start - Begin setup
-2️⃣ /addch <channel_name> - Add a new Dailymotion channel
+2️⃣ /addch <channel_id> - Add a new Dailymotion channel (use channel ID, e.g., x123abc)
 3️⃣ /list - Show all your channels
 4️⃣ /upload - Start video upload process
 5️⃣ Provide Dailymotion API credentials, then send a video and title
@@ -212,12 +213,12 @@ Visit: https://developers.dailymotion.com/
                 if user_id not in self.user_sessions:
                     await event.respond("Please start with /start command")
                     return
-                channel_name = event.pattern_match.group(1).strip()
-                if channel_name:
-                    self.user_sessions[user_id]['channels'][channel_name] = True
-                    await event.respond(f"✅ Added channel: {channel_name}")
+                channel_id = event.pattern_match.group(1).strip()
+                if channel_id:
+                    self.user_sessions[user_id]['channels'][channel_id] = True
+                    await event.respond(f"✅ Added channel: {channel_id}")
                 else:
-                    await event.respond("❌ Please provide a channel name, e.g., /addch MyChannel")
+                    await event.respond("❌ Please provide a channel ID, e.g., /addch x123abc")
             
             @self.client.on(events.NewMessage(pattern='/list'))
             async def list_channels_handler(event):
@@ -229,7 +230,7 @@ Visit: https://developers.dailymotion.com/
                 if channels:
                     await event.respond("📋 **Your Channels:**\n" + "\n".join(channels.keys()))
                 else:
-                    await event.respond("📭 No channels added yet. Use /addch <channel_name> to add one.")
+                    await event.respond("📭 No channels added yet. Use /addch <channel_id> to add one.")
             
             @self.client.on(events.NewMessage(pattern='/upload'))
             async def upload_handler(event):
@@ -329,54 +330,55 @@ Visit: https://developers.dailymotion.com/
             logger.error(f"Error starting bot on Render: {e}")
             raise
     
-    async def process_video_upload(self, event, session):
-        """Process video upload with progress tracking"""
-        try:
-            video_message = session['video_message']
-            title = session['video_title']
-            channel = session.get('selected_channel', '')
-            logger.info(f"Starting video upload process for user {event.sender_id} with title: {title}, channel: {channel}")
-            
-            # Send initial progress message
-            progress_msg = await event.respond("📥 **Downloading video...**\n⏳ 0%")
-            logger.info(f"Sent initial progress message for download")
-            
-            # Download video with progress
-            file_name = f"video_{int(time.time())}_{event.sender_id}.mp4"
-            file_path = os.path.join(self.temp_dir, file_name)
-            logger.info(f"Attempting to download video to: {file_path}")
-            
-            await video_message.download_media(file=file_path, progress_callback=lambda current, total: 
-                asyncio.create_task(self.update_progress(progress_msg, "📥 Downloading", current, total)))
-            
-            logger.info(f"Video downloaded to: {file_path}")
-            
-            # Verify file exists and is not empty
-            if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-                logger.error(f"Downloaded file is missing or empty: {file_path}")
-                await progress_msg.edit("❌ **Error:** Downloaded file is missing or empty. Please try again.")
-                return
-            
-            # Update progress for upload
-            await progress_msg.edit("📤 **Uploading to Dailymotion...**\n⏳ Processing...")
-            logger.info("Updated progress message to uploading state")
-            
-            # Upload to Dailymotion
-            video_url, error_msg = self.uploader.upload_video(file_path, title, channel=channel)
-            logger.info(f"Upload result - URL: {video_url}, Error: {error_msg}")
-            
-            # Clean up temporary file
+    async def process_video_upload(self, event, session, max_retries=3):
+        """Process video upload with progress tracking and retry logic"""
+        for attempt in range(max_retries):
             try:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    logger.info(f"Cleaned up temporary file: {file_path}")
-                else:
-                    logger.warning(f"Temporary file not found for cleanup: {file_path}")
-            except Exception as e:
-                logger.error(f"Error cleaning up temporary file: {e}")
-            
-            if video_url:
-                success_msg = f"""
+                video_message = session['video_message']
+                title = session['video_title']
+                channel = session.get('selected_channel', '')
+                logger.info(f"Starting video upload process (Attempt {attempt + 1}/{max_retries}) for user {event.sender_id} with title: {title}, channel: {channel}")
+                
+                # Send initial progress message
+                progress_msg = await event.respond("📥 **Downloading video...**\n⏳ 0%")
+                logger.info(f"Sent initial progress message for download")
+                
+                # Download video with progress
+                file_name = f"video_{int(time.time())}_{event.sender_id}.mp4"
+                file_path = os.path.join(self.temp_dir, file_name)
+                logger.info(f"Attempting to download video to: {file_path}")
+                
+                await video_message.download_media(file=file_path, progress_callback=lambda current, total: 
+                    asyncio.create_task(self.update_progress(progress_msg, "📥 Downloading", current, total)))
+                
+                logger.info(f"Video downloaded to: {file_path}")
+                
+                # Verify file exists and is not empty
+                if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+                    logger.error(f"Downloaded file is missing or empty: {file_path}")
+                    await progress_msg.edit("❌ **Error:** Downloaded file is missing or empty. Please try again.")
+                    return
+                
+                # Update progress for upload
+                await progress_msg.edit("📤 **Uploading to Dailymotion...**\n⏳ Processing...")
+                logger.info("Updated progress message to uploading state")
+                
+                # Upload to Dailymotion
+                video_url, error_msg = self.uploader.upload_video(file_path, title, channel=channel)
+                logger.info(f"Upload result - URL: {video_url}, Error: {error_msg}")
+                
+                # Clean up temporary file
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        logger.info(f"Cleaned up temporary file: {file_path}")
+                    else:
+                        logger.warning(f"Temporary file not found for cleanup: {file_path}")
+                except Exception as e:
+                    logger.error(f"Error cleaning up temporary file: {e}")
+                
+                if video_url:
+                    success_msg = f"""
 ✅ **Upload Successful!**
 
 📹 **Video Title:** {title}
@@ -384,16 +386,29 @@ Visit: https://developers.dailymotion.com/
 
 The video is now available on Dailymotion!
 Use /upload to send another video.
-                """
-                await progress_msg.edit(success_msg)
-                logger.info(f"Successfully processed upload for user {event.sender_id}")
-            else:
-                await progress_msg.edit(f"❌ **Upload Failed:**\n{error_msg}\n\nPlease try again with /upload.")
-                logger.error(f"Upload failed for user {event.sender_id}: {error_msg}")
+                    """
+                    await progress_msg.edit(success_msg)
+                    logger.info(f"Successfully processed upload for user {event.sender_id}")
+                    return
+                else:
+                    await progress_msg.edit(f"❌ **Upload Failed:**\n{error_msg}\n\nPlease try again with /upload.")
+                    logger.error(f"Upload failed for user {event.sender_id}: {error_msg}")
+                    return
                 
-        except Exception as e:
-            logger.error(f"Error processing upload for user {event.sender_id} on Render: {e}")
-            await event.respond(f"❌ **Error:** {str(e)}")
+            except TelethonConnectionError as e:
+                logger.error(f"Connection error during upload attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    logger.info("Reconnecting and retrying...")
+                    await asyncio.sleep(2)  # Wait before retry
+                    await self.client.connect()  # Reconnect
+                    continue
+                else:
+                    logger.error(f"Max retries reached for user {event.sender_id}: {e}")
+                    await event.respond(f"❌ **Error:** Max retries reached. Please try again with /upload. Error: {str(e)}")
+            except Exception as e:
+                logger.error(f"Error processing upload for user {event.sender_id} on Render: {e}")
+                await event.respond(f"❌ **Error:** {str(e)}")
+                return
     
     async def update_progress(self, message, action, current, total):
         """Update progress message"""
@@ -429,7 +444,8 @@ Use /upload to send another video.
 bot_instance = None
 
 async def health_check(request):
-    """Health check endpoint for Render"""
+    """Health check endpoint for Render with keep-alive"""
+    logger.info("Health check received")
     return web.Response(text="Bot is running", status=200)
 
 async def webhook_handler(request):
@@ -437,7 +453,7 @@ async def webhook_handler(request):
     return web.Response(text="Webhook received", status=200)
 
 async def init_web_server():
-    """Initialize web server for Render"""
+    """Initialize web server for Render with keep-alive"""
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
@@ -451,7 +467,7 @@ async def init_web_server():
     site = web.TCPSite(runner, host, port)
     await site.start()
     
-    logger.info(f"Web server started on {host}:{port} for Render")
+    logger.info(f"Web server started on {host}:{port} for Render with keep-alive")
     return runner
 
 async def main():
