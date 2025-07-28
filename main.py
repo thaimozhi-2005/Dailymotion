@@ -34,30 +34,52 @@ class DailymotionUploader:
     def get_access_token(self, api_key, api_secret, username, password):
         """Get access token using username and password"""
         try:
-            token_url = "https://www.dailymotion.com/oauth/token"
+            # Corrected OAuth token URL
+            token_url = "https://api.dailymotion.com/oauth/token"
             
+            # Data payload with version=2 for password grant type
             data = {
                 'grant_type': 'password',
                 'client_id': api_key,
                 'client_secret': api_secret,
                 'username': username,
                 'password': password,
-                'scope': 'read write'
+                'scope': 'read write',
+                'version': '2'  # Added as per Dailymotion API examples
             }
             
-            response = requests.post(token_url, data=data, timeout=30)
+            # Ensure proper headers for form-encoded data
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+            
+            # Make POST request
+            response = requests.post(token_url, data=data, headers=headers, timeout=30)
             
             if response.status_code == 200:
                 token_data = response.json()
                 self.access_token = token_data.get('access_token')
+                if not self.access_token:
+                    logger.error("No access token found in response")
+                    return False
                 logger.info("Successfully obtained Dailymotion access token")
+                self.api_key = api_key
+                self.api_secret = api_secret
+                self.username = username
+                self.password = password
                 return True
             else:
-                logger.error(f"Token error: {response.text}")
+                logger.error(f"Token error: {response.status_code} - {response.text}")
                 return False
                 
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during authentication: {e}")
+            return False
+        except ValueError as e:
+            logger.error(f"JSON parsing error: {e}")
+            return False
         except Exception as e:
-            logger.error(f"Authentication error: {e}")
+            logger.error(f"Unexpected authentication error: {e}")
             return False
     
     def upload_video(self, file_path, title, description="", tags=""):
@@ -67,16 +89,17 @@ class DailymotionUploader:
         
         try:
             # Step 1: Get upload URL
-            upload_url = "https://www.dailymotion.com/api/file/upload"
+            upload_url = "https://api.dailymotion.com/file/upload"  # Corrected base URL
             
             headers = {
-                'Authorization': f'Bearer {self.access_token}'
+                'Authorization': f'Bearer {self.access_token}',
+                'Content-Type': 'application/json'
             }
             
             response = requests.get(upload_url, headers=headers, timeout=30)
             
             if response.status_code != 200:
-                return None, f"Failed to get upload URL: {response.text}"
+                return None, f"Failed to get upload URL: {response.status_code} - {response.text}"
             
             upload_data = response.json()
             upload_endpoint = upload_data.get('upload_url')
@@ -90,7 +113,7 @@ class DailymotionUploader:
                 upload_response = requests.post(upload_endpoint, files=files, timeout=300)
             
             if upload_response.status_code != 200:
-                return None, f"File upload failed: {upload_response.text}"
+                return None, f"File upload failed: {upload_response.status_code} - {upload_response.text}"
             
             upload_result = upload_response.json()
             file_url = upload_result.get('url')
@@ -99,7 +122,7 @@ class DailymotionUploader:
                 return None, "No file URL received after upload"
             
             # Step 3: Create video object
-            create_url = "https://www.dailymotion.com/api/videos"
+            create_url = "https://api.dailymotion.com/videos"  # Corrected base URL
             
             video_data = {
                 'url': file_url,
@@ -121,10 +144,16 @@ class DailymotionUploader:
                 else:
                     return None, "Video created but no ID received"
             else:
-                return None, f"Video creation failed: {create_response.text}"
+                return None, f"Video creation failed: {create_response.status_code} - {create_response.text}"
                 
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error during upload: {e}")
+            return None, f"Upload error: {str(e)}"
+        except ValueError as e:
+            logger.error(f"JSON parsing error during upload: {e}")
+            return None, f"Upload error: {str(e)}"
         except Exception as e:
-            logger.error(f"Upload error: {str(e)}")
+            logger.error(f"Unexpected upload error: {str(e)}")
             return None, f"Upload error: {str(e)}"
 
 class TelegramBot:
