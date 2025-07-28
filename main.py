@@ -78,6 +78,7 @@ class DailymotionUploader:
     def upload_video(self, file_path, title, description="", tags="", channel=""):
         """Upload video to Dailymotion with optional channel"""
         if not self.access_token:
+            logger.error("No access token available for upload")
             return None, "No access token available"
         
         try:
@@ -96,12 +97,16 @@ class DailymotionUploader:
             upload_data = response.json()
             upload_endpoint = upload_data.get('upload_url')
             if not upload_endpoint:
-                logger.error("No upload URL received in response")
+                logger.error("No upload URL received in response: %s", upload_data)
                 return None, "No upload URL received"
             
             logger.info(f"Received upload endpoint: {upload_endpoint}")
             
             # Step 2: Upload file
+            if not os.path.exists(file_path):
+                logger.error(f"File not found: {file_path}")
+                return None, f"File not found: {file_path}"
+            
             with open(file_path, 'rb') as video_file:
                 files = {'file': (os.path.basename(file_path), video_file, 'video/mp4')}
                 upload_response = requests.post(upload_endpoint, files=files, timeout=600)  # Increased timeout
@@ -113,7 +118,7 @@ class DailymotionUploader:
             upload_result = upload_response.json()
             file_url = upload_result.get('url')
             if not file_url:
-                logger.error("No file URL received after upload")
+                logger.error("No file URL received after upload: %s", upload_result)
                 return None, "No file URL received after upload"
             
             logger.info(f"File uploaded, received file URL: {file_url}")
@@ -140,20 +145,20 @@ class DailymotionUploader:
                     logger.info(f"Successfully uploaded video: {video_id}")
                     return video_url, "Success"
                 else:
-                    logger.error("Video created but no ID received")
+                    logger.error("Video created but no ID received: %s", result)
                     return None, "Video created but no ID received"
             else:
                 logger.error(f"Video creation failed: {create_response.status_code} - {create_response.text}")
                 return None, f"Video creation failed: {create_response.status_code} - {create_response.text}"
                 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Network error during upload: {e}")
+            logger.error(f"Network error during upload: {e}, File: {file_path}")
             return None, f"Upload error: {str(e)}"
         except ValueError as e:
-            logger.error(f"JSON parsing error during upload: {e}")
+            logger.error(f"JSON parsing error during upload: {e}, File: {file_path}")
             return None, f"Upload error: {str(e)}"
         except Exception as e:
-            logger.error(f"Unexpected upload error: {e}")
+            logger.error(f"Unexpected upload error: {e}, File: {file_path}")
             return None, f"Upload error: {str(e)}"
 
 class TelegramBot:
