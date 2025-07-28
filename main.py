@@ -461,4 +461,10 @@ Visit: https://developers.dailymotion.com/
             logger.error(f"Bot error at %s: {e}", time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()))
             loop.run_until_complete(shutdown_handler())
 
-if __name__ ==
+if __name__ == "__main__":
+    TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8366671808:AAEDfoXpJyNmGn7QaITt1iO-mR0S2QvBwo0')
+    TELEGRAM_API_ID = int(os.environ.get('TELEGRAM_API_ID', '27891965'))
+    TELEGRAM_API_HASH = os.environ.get('TELEGRAM_API_HASH', '909e944f30752b2c47804cbccb8c5c4f')
+    
+    bot = TelegramDailymotionBot(TELEGRAM_BOT_TOKEN, TELEGRAM_API_ID, TELEGRAM_API_HASH)
+    bot.run()
