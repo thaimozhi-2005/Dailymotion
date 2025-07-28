@@ -16,7 +16,6 @@ from aiohttp import web
 import signal
 import sys
 from telethon.errors import RPCError
-import json
 
 # Configure logging for Render
 logging.basicConfig(
@@ -109,7 +108,7 @@ class DailymotionUploader:
             
             with open(file_path, 'rb') as video_file:
                 files = {'file': (os.path.basename(file_path), video_file, 'video/mp4')}
-                upload_response = requests.post(upload_endpoint, files=files, timeout=600)  # Increased timeout
+                upload_response = requests.post(upload_endpoint, files=files, timeout=600)
             
             if upload_response.status_code != 200:
                 logger.error(f"File upload failed: {upload_response.status_code} - {upload_response.text}")
@@ -170,9 +169,9 @@ class TelegramBot:
         self.uploader = DailymotionUploader()
         self.user_sessions = {}  # In-memory sessions
         self.temp_dir = tempfile.mkdtemp()
-        self.session_file = os.path.join(self.temp_dir, 'sessions.json')  # File to persist sessions
+        self.session_file = os.path.join(self.temp_dir, 'sessions.json')
         self.running = False
-        self.load_sessions()  # Load saved sessions on startup
+        self.load_sessions()
         
     def load_sessions(self):
         """Load user sessions from file if it exists"""
@@ -181,15 +180,23 @@ class TelegramBot:
                 with open(self.session_file, 'r') as f:
                     self.user_sessions = json.load(f)
                 logger.info("Loaded user sessions from file")
+                # Re-authenticate if token is missing
+                for user_id, session in self.user_sessions.items():
+                    if all(k in session for k in ['api_key', 'api_secret', 'username', 'password']) and not self.uploader.access_token:
+                        self.uploader.get_access_token(session['api_key'], session['api_secret'], session['username'], session['password'])
         except Exception as e:
             logger.error(f"Error loading sessions: {e}")
             self.user_sessions = {}
     
     def save_sessions(self):
-        """Save user sessions to file"""
+        """Save user sessions to file, excluding non-serializable objects"""
         try:
+            # Create a copy without video_message
+            sessions_copy = {}
+            for user_id, session in self.user_sessions.items():
+                sessions_copy[user_id] = {k: v for k, v in session.items() if k != 'video_message'}
             with open(self.session_file, 'w') as f:
-                json.dump(self.user_sessions, f)
+                json.dump(sessions_copy, f)
             logger.info("Saved user sessions to file")
         except Exception as e:
             logger.error(f"Error saving sessions: {e}")
@@ -295,7 +302,7 @@ Visit: https://developers.dailymotion.com/
                     return
                 
                 session = self.user_sessions[user_id]
-                step = session.get('step', 'authenticated')  # Default to authenticated if not set
+                step = session.get('step', 'authenticated')
                 
                 logger.info(f"Processing message for user {user_id}, step: {step}")
                 
@@ -340,7 +347,6 @@ Visit: https://developers.dailymotion.com/
                 elif step == 'waiting_video' and event.document:
                     if event.document.mime_type and event.document.mime_type.startswith('video/'):
                         session['step'] = 'waiting_title'
-                        session['video_message'] = event
                         await event.respond("📝 Please send the **title** for this video:")
                         logger.info(f"Video received from user {user_id}, waiting for title")
                     else:
@@ -393,7 +399,6 @@ Visit: https://developers.dailymotion.com/
         """Process video upload with progress tracking and retry logic"""
         for attempt in range(max_retries):
             try:
-                video_message = session['video_message']
                 title = session['video_title']
                 channel = session.get('selected_channel', '')
                 logger.info(f"Starting video upload process (Attempt {attempt + 1}/{max_retries}) for user {event.sender_id} with title: {title}, channel: {channel}")
@@ -407,7 +412,7 @@ Visit: https://developers.dailymotion.com/
                 file_path = os.path.join(self.temp_dir, file_name)
                 logger.info(f"Attempting to download video to: {file_path}")
                 
-                await video_message.download_media(file=file_path, progress_callback=lambda current, total: 
+                await event.download_media(file=file_path, progress_callback=lambda current, total: 
                     asyncio.create_task(self.update_progress(progress_msg, "📥 Downloading", current, total)))
                 
                 logger.info(f"Video downloaded to: {file_path}")
@@ -464,8 +469,8 @@ Use /upload to send another video.
                 logger.error(f"RPC error during upload attempt {attempt + 1}: {e}")
                 if "disconnected" in str(e).lower() or attempt < max_retries - 1:
                     logger.info("Reconnecting and retrying...")
-                    await asyncio.sleep(2)  # Wait before retry
-                    await self.client.connect()  # Reconnect
+                    await asyncio.sleep(2)
+                    await self.client.connect()
                     continue
                 else:
                     logger.error(f"Max retries reached for user {event.sender_id}: {e}")
@@ -495,7 +500,7 @@ Use /upload to send another video.
         if self.client:
             await self.client.disconnect()
             logger.info("Disconnected Telegram client")
-        self.save_sessions()  # Save sessions before cleanup
+        self.save_sessions()
         self.cleanup()
         logger.info("Bot stopped successfully on Render")
     
