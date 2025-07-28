@@ -15,7 +15,7 @@ import logging
 from aiohttp import web
 import signal
 import sys
-from telethon.errors import ConnectionError as TelethonConnectionError
+from telethon.errors import RPCError
 
 # Configure logging for Render
 logging.basicConfig(
@@ -395,9 +395,9 @@ Use /upload to send another video.
                     logger.error(f"Upload failed for user {event.sender_id}: {error_msg}")
                     return
                 
-            except TelethonConnectionError as e:
-                logger.error(f"Connection error during upload attempt {attempt + 1}: {e}")
-                if attempt < max_retries - 1:
+            except RPCError as e:
+                logger.error(f"RPC error during upload attempt {attempt + 1}: {e}")
+                if "disconnected" in str(e).lower() or attempt < max_retries - 1:
                     logger.info("Reconnecting and retrying...")
                     await asyncio.sleep(2)  # Wait before retry
                     await self.client.connect()  # Reconnect
