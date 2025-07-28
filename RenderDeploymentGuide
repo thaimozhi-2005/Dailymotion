@@ -1,0 +1,142 @@
+🚀 Dailymotion Telegram Bot - Render Deployment Guide
+📋 Prerequisites
+Render Account: Sign up at render.com
+GitHub Repository: Upload your code to GitHub
+Telegram Bot: Create a bot via @BotFather
+Telegram API: Get credentials from my.telegram.org
+📁 File Structure
+your-repo/
+├── main.py                 # Main bot code
+├── requirements.txt        # Python dependencies
+├── render.yaml            # Render configuration
+├── Dockerfile             # Optional Docker config
+└── README.md              # This guide
+🔧 Setup Instructions
+1. Create GitHub Repository
+Create a new repository on GitHub
+Upload all the provided files:
+main.py (the main bot code)
+requirements.txt (dependencies)
+render.yaml (Render config)
+Dockerfile (optional)
+2. Get Required Credentials
+Telegram API Credentials:
+Go to my.telegram.org
+Login with your phone number
+Go to "API Development Tools"
+Create a new application
+Note down your API ID and API Hash
+Telegram Bot Token:
+Message @BotFather on Telegram
+Send /newbot
+Choose a name and username for your bot
+Copy the bot token provided
+3. Deploy on Render
+Option A: Using Dashboard (Recommended)
+Connect Repository:
+Go to Render Dashboard
+Click "New" → "Web Service"
+Connect your GitHub repository
+Select your bot repository
+Configure Service:
+Name: dailymotion-telegram-bot
+Runtime: Python 3
+Build Command: pip install -r requirements.txt
+Start Command: python main.py
+Plan: Free (or paid for better performance)
+Set Environment Variables:
+TELEGRAM_API_ID=your_api_id_here
+TELEGRAM_API_HASH=your_api_hash_here
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+Deploy: Click "Create Web Service"
+Option B: Using render.yaml (Auto-deploy)
+Make sure render.yaml is in your repository root
+The file will automatically configure the service
+You still need to set environment variables manually in Render dashboard
+4. Configure Environment Variables
+In Render Dashboard:
+
+Go to your service
+Click "Environment" tab
+Add these variables:
+Variable	Value	Description
+TELEGRAM_API_ID	Your API ID	From my.telegram.org
+TELEGRAM_API_HASH	Your API Hash	From my.telegram.org
+TELEGRAM_BOT_TOKEN	Your Bot Token	From @BotFather
+5. Verify Deployment
+Check Logs: Go to "Logs" tab to see if bot started successfully
+Health Check: Visit your service URL /health endpoint
+Test Bot: Message your bot on Telegram with /start
+🔍 Monitoring & Troubleshooting
+Health Check Endpoints
+/ - Basic health check
+/health - Detailed health status
+/webhook - Webhook endpoint (if needed)
+Common Issues
+Bot not responding:
+Check environment variables are set correctly
+Verify bot token is valid
+Check logs for error messages
+Import errors:
+Ensure all dependencies are in requirements.txt
+Check Python version compatibility
+Memory issues:
+Upgrade to paid plan for more resources
+Monitor usage in Render dashboard
+Timeout errors:
+Increase timeout values in requests
+Consider using webhook mode for better performance
+Viewing Logs
+bash
+# In Render dashboard, go to "Logs" tab
+# Or use Render CLI:
+render logs -s your-service-name
+🔄 Auto-Deploy Setup
+Enable Auto-Deploy:
+In service settings, enable "Auto-Deploy"
+Bot will redeploy automatically on GitHub pushes
+Branch Configuration:
+Set deployment branch (usually main or master)
+Configure build triggers
+📊 Performance Tips
+Free Tier Limitations:
+Service sleeps after 15 minutes of inactivity
+750 hours/month limit
+Consider paid plans for 24/7 operation
+Optimization:
+Use efficient file handling
+Implement request caching where possible
+Clean up temporary files regularly
+Scaling:
+Monitor CPU and memory usage
+Upgrade plan if needed
+Consider multiple instances for high traffic
+🔐 Security Best Practices
+Environment Variables:
+Never commit credentials to repository
+Use Render's environment variable system
+Rotate tokens regularly
+Bot Security:
+Implement rate limiting
+Validate user inputs
+Monitor for abuse
+📞 Support
+If you encounter issues:
+
+Check Logs: Always check service logs first
+Render Documentation: docs.render.com
+Telegram Bot API: core.telegram.org/bots/api
+GitHub Issues: Create issues in your repository
+🎉 Success!
+Once deployed successfully:
+
+Your bot will be available 24/7 on Telegram
+Users can upload videos to Dailymotion through the bot
+All uploads are processed with progress tracking
+Temporary files are automatically cleaned up
+Bot Commands:
+
+/start - Begin interaction and setup credentials
+/help - Show help information
+The bot will handle multiple users simultaneously and maintain separate sessions for each user.
+
