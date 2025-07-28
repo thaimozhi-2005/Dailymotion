@@ -177,7 +177,8 @@ class TelegramBot:
             @self.client.on(events.NewMessage(pattern='/start'))
             async def start_handler(event):
                 user_id = event.sender_id
-                self.user_sessions[user_id] = {'step': 'waiting_api_key', 'channels': {}}
+                if user_id not in self.user_sessions:
+                    self.user_sessions[user_id] = {'step': 'waiting_api_key', 'channels': {}}
                 welcome_msg = """
 🎬 **Dailymotion Video Upload Bot**
 
@@ -187,6 +188,7 @@ First, I need your Dailymotion API credentials:
 📝 Please send your **API Key**:
                 """
                 await event.respond(welcome_msg)
+                logger.info(f"Started session for user {user_id}")
             
             @self.client.on(events.NewMessage(pattern='/help'))
             async def help_handler(event):
@@ -206,6 +208,7 @@ Visit: https://developers.dailymotion.com/
 **Max file size:** Depends on your Dailymotion account
                 """
                 await event.respond(help_msg)
+                logger.info(f"Help requested by user {event.sender_id}")
             
             @self.client.on(events.NewMessage(pattern='/addch (.*)'))
             async def add_channel_handler(event):
@@ -217,6 +220,7 @@ Visit: https://developers.dailymotion.com/
                 if channel_id:
                     self.user_sessions[user_id]['channels'][channel_id] = True
                     await event.respond(f"✅ Added channel: {channel_id}")
+                    logger.info(f"Added channel {channel_id} for user {user_id}")
                 else:
                     await event.respond("❌ Please provide a channel ID, e.g., /addch x123abc")
             
@@ -231,15 +235,21 @@ Visit: https://developers.dailymotion.com/
                     await event.respond("📋 **Your Channels:**\n" + "\n".join(channels.keys()))
                 else:
                     await event.respond("📭 No channels added yet. Use /addch <channel_id> to add one.")
+                logger.info(f"Listed channels for user {user_id}")
             
             @self.client.on(events.NewMessage(pattern='/upload'))
             async def upload_handler(event):
                 user_id = event.sender_id
-                if user_id not in self.user_sessions or self.user_sessions[user_id].get('step') != 'authenticated':
+                if user_id not in self.user_sessions:
+                    await event.respond("Please start with /start command")
+                    return
+                session = self.user_sessions[user_id]
+                if not all(k in session for k in ['api_key', 'api_secret', 'username', 'password']) or not self.uploader.access_token:
                     await event.respond("Please authenticate with /start and provide credentials first.")
                     return
-                self.user_sessions[user_id]['step'] = 'waiting_video'
+                session['step'] = 'waiting_video'
                 await event.respond("📹 **Upload Process Started**\nPlease send the video file you want to upload.")
+                logger.info(f"Upload process started for user {user_id}")
             
             @self.client.on(events.NewMessage)
             async def message_handler(event):
@@ -250,25 +260,31 @@ Visit: https://developers.dailymotion.com/
                 
                 if user_id not in self.user_sessions:
                     await event.respond("Please start with /start command")
+                    logger.info(f"New user {user_id} prompted to start")
                     return
                 
                 session = self.user_sessions[user_id]
-                step = session.get('step')
+                step = session.get('step', 'authenticated')  # Default to authenticated if not set
+                
+                logger.info(f"Processing message for user {user_id}, step: {step}")
                 
                 if step == 'waiting_api_key':
                     session['api_key'] = event.text.strip()
                     session['step'] = 'waiting_api_secret'
                     await event.respond("✅ API Key saved!\n📝 Please send your **API Secret**:")
+                    logger.info(f"API Key saved for user {user_id}")
                     
                 elif step == 'waiting_api_secret':
                     session['api_secret'] = event.text.strip()
                     session['step'] = 'waiting_username'
                     await event.respond("✅ API Secret saved!\n📝 Please send your **Dailymotion Username**:")
+                    logger.info(f"API Secret saved for user {user_id}")
                     
                 elif step == 'waiting_username':
                     session['username'] = event.text.strip()
                     session['step'] = 'waiting_password'
                     await event.respond("✅ Username saved!\n📝 Please send your **Dailymotion Password**:")
+                    logger.info(f"Username saved for user {user_id}")
                     
                 elif step == 'waiting_password':
                     session['password'] = event.text.strip()
@@ -284,17 +300,21 @@ Visit: https://developers.dailymotion.com/
                     
                     if success:
                         await event.respond("✅ **Authentication Successful!**\n\nUse /upload to start uploading a video.")
+                        logger.info(f"Authentication successful for user {user_id}")
                     else:
                         await event.respond("❌ **Authentication Failed!**\n\nPlease check your credentials and try again with /start")
                         del self.user_sessions[user_id]
+                        logger.error(f"Authentication failed for user {user_id}")
                         
                 elif step == 'waiting_video' and event.document:
                     if event.document.mime_type and event.document.mime_type.startswith('video/'):
                         session['step'] = 'waiting_title'
                         session['video_message'] = event
                         await event.respond("📝 Please send the **title** for this video:")
+                        logger.info(f"Video received from user {user_id}, waiting for title")
                     else:
                         await event.respond("❌ Please send a video file!")
+                        logger.info(f"Non-video file received from user {user_id}")
                         
                 elif step == 'waiting_title':
                     title = event.text.strip()
@@ -306,6 +326,7 @@ Visit: https://developers.dailymotion.com/
                     else:
                         session['step'] = 'authenticated'
                         await self.process_video_upload(event, session)
+                    logger.info(f"Title '{title}' received from user {user_id}")
                 
                 elif step == 'waiting_channel':
                     try:
@@ -323,8 +344,10 @@ Visit: https://developers.dailymotion.com/
                                 await self.process_video_upload(event, session)
                             else:
                                 await event.respond("❌ Invalid choice. Please send a valid number or 'skip'.")
+                        logger.info(f"Channel selection processed for user {user_id}")
                     except ValueError:
                         await event.respond("❌ Please send a number or 'skip'.")
+                        logger.info(f"Invalid channel selection from user {user_id}")
         
         except Exception as e:
             logger.error(f"Error starting bot on Render: {e}")
