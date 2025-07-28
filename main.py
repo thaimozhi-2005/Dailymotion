@@ -443,19 +443,22 @@ Visit: https://developers.dailymotion.com/
         async def health_check(request):
             return web.Response(text="Bot is running", status=200)
         
-        port = int(os.environ.get('PORT', '8080'))  # Use Render's PORT env var or default to 8080
+        port = int(os.environ.get('PORT', '8080'))
         app = web.Application()
         app.router.add_get('/health', health_check)
         web_runner = web.AppRunner(app)
-        asyncio.run_coroutine_threadsafe(web_runner.setup(), asyncio.get_event_loop())
+        
+        # Ensure setup is awaited before creating TCPSite
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(web_runner.setup())
         site = web.TCPSite(web_runner, '0.0.0.0', port)
-        asyncio.run_coroutine_threadsafe(site.start(), asyncio.get_event_loop())
+        loop.run_until_complete(site.start())
         
         try:
-            asyncio.run(self.start_bot())
+            loop.run_until_complete(self.start_bot())
         except Exception as e:
             logger.error(f"Bot error at %s: {e}", time.strftime('%Y-%m-%d %H:%M:%S', time.localtime()))
-            asyncio.run_coroutine_threadsafe(shutdown_handler(), asyncio.get_event_loop())
+            loop.run_until_complete(shutdown_handler())
 
 if __name__ == "__main__":
     TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '8366671808:AAEDfoXpJyNmGn7QaITt1iO-mR0S2QvBwo0')
