@@ -18,14 +18,13 @@ API_ID = int(os.getenv('TELEGRAM_API_ID'))
 API_HASH = os.getenv('TELEGRAM_API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-# Initialize Pyrogram client for large file handling with proper session management
+# Initialize Pyrogram client as a BOT (not user client)
 app = Client(
     "dailymotion_bot", 
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
-    in_memory=True,  # Use in-memory session to avoid file issues
-    no_updates=False  # Enable updates
+    in_memory=True  # Don't create session files
 )
 
 # Global storage for user credentials (in production, use a database)
@@ -52,7 +51,8 @@ class DailymotionUploader:
                 'scope': 'manage_videos'
             }
             
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(f"{self.base_url}/oauth/token", data=auth_data) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -115,8 +115,9 @@ class DailymotionUploader:
         """Get upload URL from Dailymotion"""
         try:
             headers = {'Authorization': f'Bearer {self.access_token}'}
+            timeout = aiohttp.ClientTimeout(total=30)
             
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(f"{self.base_url}/file/upload", headers=headers) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -169,7 +170,8 @@ class DailymotionUploader:
                 'published': 'true'
             }
             
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(f"{self.base_url}/me/videos", 
                                       headers=headers, 
                                       data=video_data) as response:
@@ -507,7 +509,7 @@ async def start_health_server():
         health_app = web.Application()
         health_app.router.add_get('/health', health_check)
         health_app.router.add_get('/', health_check)
-        health_app.router.add_head('/', health_check)  # Add HEAD method support
+        health_app.router.add_head('/', health_check)  # Add HEAD method for health checks
         
         port = int(os.getenv('PORT', 10000))
         runner = web.AppRunner(health_app)
@@ -523,14 +525,16 @@ async def start_health_server():
         return None
 
 # Graceful shutdown handler
-async def shutdown_handler():
-    """Handle graceful shutdown"""
-    logger.info("Shutting down gracefully...")
-    try:
-        if app.is_connected:
-            await app.stop()
-    except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
+def setup_signal_handlers():
+    """Setup signal handlers for graceful shutdown"""
+    import signal
+    
+    def signal_handler(sig, frame):
+        logger.info(f"Received signal {sig}, shutting down gracefully...")
+        # The main loop will handle cleanup
+        
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
 
 # Main function for Render deployment
 async def main():
@@ -538,45 +542,41 @@ async def main():
     health_runner = None
     
     try:
-        # Start health check server first
-        logger.info("Starting health server...")
-        health_runner = await start_health_server()
+        # Setup signal handlers
+        setup_signal_handlers()
         
-        if not health_runner:
-            logger.error("Failed to start health server")
-            return
+        # Start health check server
+        health_runner = await start_health_server()
         
         # Start the bot
         logger.info("🚀 Starting Dailymotion Upload Bot...")
-        
-        # Use proper session management
         await app.start()
         logger.info("✅ Bot started successfully!")
         
-        # Keep the bot running
-        logger.info("Bot is now running and ready to receive messages...")
+        # Keep running until interrupted
         await app.idle()
         
     except KeyboardInterrupt:
-        logger.info("Received interrupt signal")
+        logger.info("Received keyboard interrupt, shutting down...")
     except Exception as e:
         logger.error(f"Startup error: {e}")
-        import traceback
-        traceback.print_exc()
     finally:
         # Cleanup
-        logger.info("Cleaning up...")
         try:
             if app.is_connected:
+                logger.info("Stopping bot...")
                 await app.stop()
         except Exception as e:
             logger.error(f"Error stopping bot: {e}")
         
         if health_runner:
             try:
+                logger.info("Stopping health server...")
                 await health_runner.cleanup()
             except Exception as e:
-                logger.error(f"Error cleaning up health server: {e}")
+                logger.error(f"Error stopping health server: {e}")
+        
+        logger.info("Shutdown complete")
 
 # Run the bot
 if __name__ == "__main__":
@@ -586,5 +586,3 @@ if __name__ == "__main__":
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
