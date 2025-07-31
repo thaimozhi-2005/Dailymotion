@@ -24,7 +24,8 @@ app = Client(
     api_id=API_ID, 
     api_hash=API_HASH, 
     bot_token=BOT_TOKEN,
-    in_memory=True  # Don't create session files
+    in_memory=True,  # Don't create session files
+    no_updates=False  # Enable updates
 )
 
 # Global storage for user credentials (in production, use a database)
@@ -525,16 +526,19 @@ async def start_health_server():
         return None
 
 # Graceful shutdown handler
-def setup_signal_handlers():
+def setup_signal_handlers(loop):
     """Setup signal handlers for graceful shutdown"""
     import signal
     
-    def signal_handler(sig, frame):
-        logger.info(f"Received signal {sig}, shutting down gracefully...")
-        # The main loop will handle cleanup
-        
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
+    def signal_handler():
+        logger.info("Received shutdown signal, initiating graceful shutdown...")
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
+    
+    if hasattr(signal, 'SIGTERM'):
+        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+    if hasattr(signal, 'SIGINT'):
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
 
 # Main function for Render deployment
 async def main():
@@ -542,11 +546,20 @@ async def main():
     health_runner = None
     
     try:
-        # Setup signal handlers
-        setup_signal_handlers()
+        # Get event loop for signal handling
+        loop = asyncio.get_event_loop()
+        
+        # Setup signal handlers (only on Unix systems)
+        try:
+            setup_signal_handlers(loop)
+        except Exception as e:
+            logger.warning(f"Could not setup signal handlers: {e}")
         
         # Start health check server
         health_runner = await start_health_server()
+        
+        if not health_runner:
+            logger.warning("Health server failed to start, continuing without it")
         
         # Start the bot
         logger.info("🚀 Starting Dailymotion Upload Bot...")
@@ -556,23 +569,37 @@ async def main():
         # Keep running until interrupted
         await app.idle()
         
+    except asyncio.CancelledError:
+        logger.info("Tasks cancelled, shutting down...")
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt, shutting down...")
     except Exception as e:
         logger.error(f"Startup error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         # Cleanup
+        logger.info("Starting cleanup process...")
+        
+        # Stop the bot gracefully
         try:
-            if app.is_connected:
-                logger.info("Stopping bot...")
+            if hasattr(app, 'is_connected') and app.is_connected:
+                logger.info("Stopping Pyrogram client...")
                 await app.stop()
+                logger.info("Pyrogram client stopped")
+            elif hasattr(app, '_Client__started') and app._Client__started:
+                logger.info("Force stopping Pyrogram client...")
+                await app.stop()
+                logger.info("Pyrogram client force stopped")
         except Exception as e:
             logger.error(f"Error stopping bot: {e}")
         
+        # Stop health server
         if health_runner:
             try:
                 logger.info("Stopping health server...")
                 await health_runner.cleanup()
+                logger.info("Health server stopped")
             except Exception as e:
                 logger.error(f"Error stopping health server: {e}")
         
