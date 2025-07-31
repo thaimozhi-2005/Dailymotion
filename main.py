@@ -488,7 +488,54 @@ async def handle_video(client, message: Message):
             "An unexpected error occurred. Please try again."
         )
 
+# Health check server for Render
+async def start_health_server():
+    """Start health check server for Render"""
+    from aiohttp import web
+    
+    async def health_check(request):
+        return web.json_response({"status": "healthy", "service": "dailymotion-bot"})
+    
+    try:
+        health_app = web.Application()
+        health_app.router.add_get('/health', health_check)
+        health_app.router.add_get('/', health_check)
+        
+        port = int(os.getenv('PORT', 10000))
+        runner = web.AppRunner(health_app)
+        await runner.setup()
+        
+        site = web.TCPSite(runner, '0.0.0.0', port)
+        await site.start()
+        
+        logger.info(f"Health server started on port {port}")
+        return runner
+    except Exception as e:
+        logger.error(f"Health server error: {e}")
+        return None
+
+# Main function for Render deployment
+async def main():
+    """Main function to run bot and health server"""
+    try:
+        # Start health check server
+        health_runner = await start_health_server()
+        
+        # Start the bot
+        logger.info("🚀 Starting Dailymotion Upload Bot...")
+        await app.start()
+        logger.info("✅ Bot started successfully!")
+        
+        # Keep running
+        await app.idle()
+        
+    except Exception as e:
+        logger.error(f"Startup error: {e}")
+    finally:
+        await app.stop()
+        if 'health_runner' in locals() and health_runner:
+            await health_runner.cleanup()
+
 # Run the bot
 if __name__ == "__main__":
-    print("🚀 Starting Dailymotion Upload Bot...")
-    app.run()
+    asyncio.run(main())
