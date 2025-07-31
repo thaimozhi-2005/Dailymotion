@@ -1,4 +1,277 @@
+import os
+import asyncio
+import logging
+import tempfile
+import time
+from pyrogram import Client, filters
+from pyrogram.types import Message
+import aiohttp
+import aiofiles
+from urllib.parse import urlencode
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Bot configuration from environment variables
+API_ID = int(os.getenv('TELEGRAM_API_ID'))
+API_HASH = os.getenv('TELEGRAM_API_HASH')
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+
+# Initialize Pyrogram client as a BOT
+app = Client(
+    "dailymotion_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    in_memory=True,  # Don't create session files
+    no_updates=False  # Enable updates
+)
+
+# Global storage for user credentials (in production, use a database)
+user_credentials = {}
+
+class DailymotionUploader:
+    def __init__(self, api_key, api_secret, username, password):
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.username = username
+        self.password = password
+        self.access_token = None
+        self.base_url = "https://partner.api.dailymotion.com"  # Updated to Partner API
+
+    async def authenticate(self):
+        """Authenticate with Dailymotion Partner API"""
+        try:
+            auth_data = {
+                'grant_type': 'password',
+                'client_id': self.api_key,
+                'client_secret': self.api_secret,
+                'username': self.username,
+                'password': self.password,
+                'scope': 'manage_videos'
+            }
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(f"{self.base_url}/oauth/token", data=auth_data) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        self.access_token = data.get('access_token')
+                        logger.info("Successfully authenticated with Dailymotion")
+                        return True
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"Authentication failed: {error_text}")
+                        return False
+        except Exception as e:
+            logger.error(f"Authentication error: {e}")
+            return False
+
+    async def upload_video(self, file_path, title, description="", progress_callback=None):
+        """Upload video to Dailymotion with error handling"""
+        max_retries = 3
+        retry_delay = 5
+
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Upload attempt {attempt + 1}/{max_retries}")
+
+                if not self.access_token:
+                    if not await self.authenticate():
+                        continue
+
+                # Step 1: Get upload URL
+                upload_url = await self._get_upload_url()
+                if not upload_url:
+                    continue
+
+                # Step 2: Upload file
+                video_url = await self._upload_file(file_path, upload_url, progress_callback)
+                if not video_url:
+                    continue
+
+                # Step 3: Create video entry
+                video_id = await self._create_video(video_url, title, description)
+                if video_id:
+                    return video_id
+
+            except aiohttp.ClientError as e:
+                logger.error(f"Network error on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+            except Exception as e:
+                logger.error(f"Upload error on attempt {attempt + 1}: {e}")
+                if "length" in str(e).lower() or "size" in str(e).lower():
+                    logger.error("File size limit exceeded")
+                    return "SIZE_ERROR"
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+
+        return None
+
+    async def _get_upload_url(self):
+        """Get upload URL from Dailymotion"""
+        try:
+            headers = {'Authorization': f'Bearer {self.access_token}'}
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{self.base_url}/file/upload", headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get('upload_url')
+                    else:
+                        logger.error(f"Get upload URL failed: {await response.text()}")
+        except Exception as e:
+            logger.error(f"Get upload URL error: {e}")
+        return None
+
+    async def _upload_file(self, file_path, upload_url, progress_callback=None):
+        """Upload file with chunked upload for large files"""
+        try:
+            file_size = os.path.getsize(file_path)
+            logger.info(f"Uploading file: {file_size} bytes")
+
+            timeout = aiohttp.ClientTimeout(total=3600)  # 1 hour timeout
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                with open(file_path, 'rb') as file:
+                    form_data = aiohttp.FormData()
+                    form_data.add_field('file', file, filename=os.path.basename(file_path))
+                    
+                    # Pass total size for progress tracking
+                    if progress_callback:
+                        total_size = file_size
+                        current = 0
+                        async with session.post(upload_url, data=form_data) as response:
+                            if response.status == 200:
+                                async for chunk in response.content.iter_chunked(1024 * 1024):  # 1MB chunks
+                                    current += len(chunk)
+                                    await progress_callback(current, total_size)
+                                result = await response.json()
+                                return result.get('url')
+                            else:
+                                error_text = await response.text()
+                                logger.error(f"File upload failed: {error_text}")
+        except Exception as e:
+            logger.error(f"File upload error: {e}")
+            raise
+        return None
+
+    async def _create_video(self, video_url, title, description):
+        """Create video entry on Dailymotion"""
+        try:
+            headers = {
+                'Authorization': f'Bearer {self.access_token}',
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+            video_data = {
+                'url': video_url,
+                'title': title,
+                'description': description,
+                'published': 'true'
+            }
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(f"{self.base_url}/me/videos",
+                                      headers=headers,
+                                      data=video_data) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get('id')
+                    else:
+                        logger.error(f"Create video failed: {await response.text()}")
+        except Exception as e:
+            logger.error(f"Create video error: {e}")
+        return None
+
+    def get_video_url(self, video_id):
+        """Get public URL of uploaded video"""
+        return f"https://www.dailymotion.com/video/{video_id}"
+
+class ProgressTracker:
+    def __init__(self, message, total_size, operation="Processing"):
+        self.message = message
+        self.total_size = total_size
+        self.operation = operation
+        self.last_update = 0
+        self.start_time = time.time()
+
+    async def update(self, current, total=None):
+        if total is None:
+            total = self.total_size
+
+        current_time = time.time()
+        if current_time - self.last_update < 3:  # Update every 3 seconds
+            return
+
+        self.last_update = current_time
+        percentage = (current / total) * 100 if total > 0 else 0
+
+        # Progress bar
+        bar_length = 15
+        filled_length = int(bar_length * current / total) if total > 0 else 0
+        bar = "█" * filled_length + "░" * (bar_length - filled_length)
+
+        # Speed and ETA
+        elapsed_time = current_time - self.start_time
+        if elapsed_time > 0 and current > 0:
+            speed = current / elapsed_time / (1024 * 1024)  # MB/s
+            eta = (total - current) / (current / elapsed_time) if current > 0 else 0
+            progress_text = f"""
+🎬 **{self.operation}**
+
+{bar} {percentage:.1f}%
+📦 {current/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB
+🚀 {speed:.1f} MB/s
+⏱️ ETA: {int(eta//60)}m {int(eta%60)}s
+            """
+        else:
+            progress_text = f"""
+🎬 **{self.operation}**
+
+{bar} {percentage:.1f}%
+📦 {current/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB
+            """
+
+        try:
+            await self.message.edit_text(progress_text.strip())
+        except Exception:
+            pass  # Ignore edit errors
+
+# Bot command handlers
+@app.on_message(filters.command("start"))
+async def start_command(client, message: Message):
+    welcome_text = """
+🎬 **Dailymotion Video Uploader Bot**
+
+This bot uploads videos from Telegram to Dailymotion using Partner API.
+
+**Commands:**
+• `/credentials` - Set your Dailymotion credentials
+• `/upload` - Upload a video (send after setting credentials)
+• `/help` - Show this help message
+
+**First, set your credentials using `/credentials`**
+    """
+    await message.reply_text(welcome_text)
+
+@app.on_message(filters.command("help"))
+async def help_command(client, message: Message):
+    help_text = """
+📖 **How to use this bot:**
+
+**Step 1:** Set your Dailymotion Partner credentials
+Send `/credentials` and provide:
+- API Key
+- API Secret  
+- Username
+- Password
+
+**Step 2:** Upload videos
+Send `/upload` then send your video file
+
+**Format for credentials:**
 **Notes:**
 - Supports large files up to 4GB (Partner API)
 - Automatic retry on network errors
