@@ -18,8 +18,15 @@ API_ID = int(os.getenv('TELEGRAM_API_ID'))
 API_HASH = os.getenv('TELEGRAM_API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-# Initialize Pyrogram client for large file handling
-app = Client("dailymotion_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# Initialize Pyrogram client for large file handling with proper session management
+app = Client(
+    "dailymotion_bot", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    bot_token=BOT_TOKEN,
+    in_memory=True,  # Use in-memory session to avoid file issues
+    no_updates=False  # Enable updates
+)
 
 # Global storage for user credentials (in production, use a database)
 user_credentials = {}
@@ -71,7 +78,7 @@ class DailymotionUploader:
                 
                 if not self.access_token:
                     if not await self.authenticate():
-                        return None
+                        continue
                 
                 # Step 1: Get upload URL
                 upload_url = await self._get_upload_url()
@@ -500,6 +507,7 @@ async def start_health_server():
         health_app = web.Application()
         health_app.router.add_get('/health', health_check)
         health_app.router.add_get('/', health_check)
+        health_app.router.add_head('/', health_check)  # Add HEAD method support
         
         port = int(os.getenv('PORT', 10000))
         runner = web.AppRunner(health_app)
@@ -514,28 +522,69 @@ async def start_health_server():
         logger.error(f"Health server error: {e}")
         return None
 
+# Graceful shutdown handler
+async def shutdown_handler():
+    """Handle graceful shutdown"""
+    logger.info("Shutting down gracefully...")
+    try:
+        if app.is_connected:
+            await app.stop()
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+
 # Main function for Render deployment
 async def main():
     """Main function to run bot and health server"""
+    health_runner = None
+    
     try:
-        # Start health check server
+        # Start health check server first
+        logger.info("Starting health server...")
         health_runner = await start_health_server()
+        
+        if not health_runner:
+            logger.error("Failed to start health server")
+            return
         
         # Start the bot
         logger.info("🚀 Starting Dailymotion Upload Bot...")
+        
+        # Use proper session management
         await app.start()
         logger.info("✅ Bot started successfully!")
         
-        # Keep running
+        # Keep the bot running
+        logger.info("Bot is now running and ready to receive messages...")
         await app.idle()
         
+    except KeyboardInterrupt:
+        logger.info("Received interrupt signal")
     except Exception as e:
         logger.error(f"Startup error: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
-        await app.stop()
-        if 'health_runner' in locals() and health_runner:
-            await health_runner.cleanup()
+        # Cleanup
+        logger.info("Cleaning up...")
+        try:
+            if app.is_connected:
+                await app.stop()
+        except Exception as e:
+            logger.error(f"Error stopping bot: {e}")
+        
+        if health_runner:
+            try:
+                await health_runner.cleanup()
+            except Exception as e:
+                logger.error(f"Error cleaning up health server: {e}")
 
 # Run the bot
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
