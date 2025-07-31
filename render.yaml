@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: dailymotion-telegram-bot
+    env: docker
+    plan: free
+    healthCheckPath: /health
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
